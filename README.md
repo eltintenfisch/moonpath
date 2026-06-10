@@ -52,6 +52,19 @@ Device `id` is the Cast UUID. Use it for all other commands via `--device-id`.
 moonpath status --device-id <uuid> --json
 ```
 
+`status.player_state` values:
+
+| Value | Meaning |
+|-------|---------|
+| `PLAYING` | Actively playing |
+| `PAUSED` | Paused |
+| `BUFFERING` | Starting or buffering |
+| `ACTIVE` | Cast app running; media details not yet available |
+| `IDLE` | Stopped / no active media |
+| `UNKNOWN` | No media session (common when `device_idle` is true) |
+
+Other useful `status` fields: `device_idle`, `content_id`, `stream_type` (`BUFFERED` / `LIVE`), `volume_level`, `volume_muted`.
+
 ### Play URL (file, podcast)
 
 ```bash
@@ -79,8 +92,10 @@ moonpath volume --device-id <uuid> --level 0.5 --json
 
 | Code | Meaning |
 |------|---------|
-| `0` | Success — parse JSON from stdout |
-| non-zero | Failure — parse JSON from stdout if `--json`, details also on stderr |
+| `0` | Success — `ok: true` JSON on stdout |
+| non-zero | Failure — `ok: false` JSON on stdout (when `--json`), logs on stderr |
+
+On failure, Moonpath **always exits non-zero**, even when stdout contains valid error JSON. Node `execFile` will reject; read JSON from `err.stdout`.
 
 ### Error JSON
 
@@ -96,6 +111,49 @@ moonpath volume --device-id <uuid> --level 0.5 --json
 ```
 
 Error types: `DeviceNotFound`, `AmbiguousDevice`, `ConnectionFailed`, `PlaybackFailed`, `InvalidArgument`, `InternalError`.
+
+### Nereid (Node.js) caller
+
+Binary resolution:
+
+```javascript
+const MOONPATH = config.moonpathBin ?? process.env.MOONPATH_BIN ?? "moonpath";
+```
+
+Wrapper (`execFile` rejects on non-zero exit):
+
+```javascript
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+const execFileAsync = promisify(execFile);
+
+async function moonpath(...args) {
+  let stdout;
+  try {
+    ({ stdout } = await execFileAsync(MOONPATH, [...args, "--json"]));
+  } catch (e) {
+    stdout = e.stdout ?? "";
+    if (!stdout) throw e;
+  }
+  const result = JSON.parse(stdout);
+  if (!result.ok) {
+    const err = new Error(result.error.message);
+    err.code = result.error.type;
+    err.operation = result.operation;
+    throw err;
+  }
+  return result;
+}
+```
+
+Is something playing?
+
+```javascript
+const s = result.status;
+const playing =
+  !s.device_idle &&
+  ["PLAYING", "PAUSED", "BUFFERING", "ACTIVE"].includes(s.player_state);
+```
 
 ## Python library (optional)
 
