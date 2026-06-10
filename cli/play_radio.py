@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-interactive",
         action="store_true",
-        help="Play and exit without interactive controls",
+        help="Start playback, print status once it is active, then exit",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
     return parser.parse_args()
@@ -42,6 +42,7 @@ def main() -> None:
     setup_logging(args.verbose)
 
     controller = None
+    leave_connected = False
     try:
         devices = discover_devices()
         device = select_device(devices, args.device)
@@ -50,14 +51,15 @@ def main() -> None:
         controller.play_radio(args.url, content_type=content_type)
 
         if args.no_interactive:
-            print(controller.get_status().format())
+            print(controller.wait_for_playback().format())
+            leave_connected = True
             return
 
         run_interactive_controls(controller)
     except Exception as exc:
         main_fail(exc, operation="play_radio", device_name=args.device)
     finally:
-        if controller is not None:
+        if controller is not None and not leave_connected:
             controller.disconnect()
 
 

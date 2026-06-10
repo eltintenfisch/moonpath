@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import PurePosixPath
 from urllib.parse import urlparse
 
@@ -14,6 +15,9 @@ from moonpath.errors import CastConnectionError
 from moonpath.models import CastDevice, PlaybackStatus
 
 logger = logging.getLogger("moonpath")
+
+DEFAULT_PLAYBACK_WAIT_TIMEOUT = 15.0
+_ACTIVE_PLAYER_STATES = frozenset({"PLAYING", "PAUSED"})
 
 _CONTENT_TYPES = {
     ".mp3": "audio/mpeg",
@@ -165,6 +169,28 @@ class CastController:
             volume_level=volume_level,
             volume_muted=volume_muted,
         )
+
+    def wait_for_playback(
+        self,
+        timeout: float = DEFAULT_PLAYBACK_WAIT_TIMEOUT,
+        poll_interval: float = 0.5,
+    ) -> PlaybackStatus:
+        """Wait until playback reaches an active state, then return status."""
+        deadline = time.monotonic() + timeout
+        status = self.get_status()
+
+        while time.monotonic() < deadline:
+            if status.player_state in _ACTIVE_PLAYER_STATES:
+                return status
+            time.sleep(poll_interval)
+            status = self.get_status()
+
+        logger.warning(
+            "Playback did not reach an active state within %.0fs (state=%s)",
+            timeout,
+            status.player_state,
+        )
+        return status
 
     def disconnect(self) -> None:
         if self._cast is not None:
