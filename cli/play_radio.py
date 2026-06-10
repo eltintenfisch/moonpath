@@ -42,7 +42,6 @@ def main() -> None:
     setup_logging(args.verbose)
 
     controller = None
-    leave_connected = False
     try:
         devices = discover_devices()
         device = select_device(devices, args.device)
@@ -52,14 +51,13 @@ def main() -> None:
 
         if args.no_interactive:
             print(controller.wait_for_playback().format())
-            leave_connected = True
             return
 
         run_interactive_controls(controller)
     except Exception as exc:
         main_fail(exc, operation="play_radio", device_name=args.device)
     finally:
-        if controller is not None and not leave_connected:
+        if controller is not None:
             controller.disconnect()
 
 

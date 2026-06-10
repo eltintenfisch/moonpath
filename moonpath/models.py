@@ -25,10 +25,15 @@ class PlaybackStatus:
     stream_type: str | None
     volume_level: float | None
     volume_muted: bool | None
+    app_name: str | None = None
+    app_id: str | None = None
+    device_idle: bool | None = None
 
     def format(self) -> str:
         lines = [
             f"device: {self.device_name or 'unknown'}",
+            f"device_idle: {self._format_bool(self.device_idle)}",
+            f"app: {self.app_name or '-'}",
             f"player_state: {self.player_state or 'unknown'}",
             f"content_id: {self.content_id or '-'}",
             f"content_type: {self.content_type or '-'}",
@@ -44,6 +49,12 @@ class PlaybackStatus:
         if value is None:
             return "-"
         return f"{value:.1f}s"
+
+    @staticmethod
+    def _format_bool(value: bool | None) -> str:
+        if value is None:
+            return "unknown"
+        return "yes" if value else "no"
 
     def _format_volume(self) -> str:
         if self.volume_level is None:

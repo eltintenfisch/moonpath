@@ -6,9 +6,11 @@ import logging
 import time
 from pathlib import PurePosixPath
 from urllib.parse import urlparse
+from uuid import UUID
 
 import pychromecast
 from pychromecast import Chromecast
+from pychromecast.error import RequestFailed
 
 from moonpath.discovery import DEFAULT_DISCOVERY_TIMEOUT
 from moonpath.errors import CastConnectionError
@@ -17,7 +19,8 @@ from moonpath.models import CastDevice, PlaybackStatus
 logger = logging.getLogger("moonpath")
 
 DEFAULT_PLAYBACK_WAIT_TIMEOUT = 15.0
-_ACTIVE_PLAYER_STATES = frozenset({"PLAYING", "PAUSED"})
+DEFAULT_SYNC_TIMEOUT = 5.0
+_ACTIVE_PLAYER_STATES = frozenset({"PLAYING", "PAUSED", "BUFFERING", "ACTIVE"})
 
 _CONTENT_TYPES = {
     ".mp3": "audio/mpeg",
@@ -51,10 +54,12 @@ class CastController:
         *,
         discovery_timeout: float = DEFAULT_DISCOVERY_TIMEOUT,
         connect_timeout: float = 10.0,
+        sync_timeout: float = DEFAULT_SYNC_TIMEOUT,
     ) -> None:
         self._device = device
         self._discovery_timeout = discovery_timeout
         self._connect_timeout = connect_timeout
+        self._sync_timeout = sync_timeout
         self._cast: Chromecast | None = None
         self._browser = None
 
@@ -68,19 +73,33 @@ class CastController:
 
         logger.info("Connecting to %s (%s)...", self._device.name, self._device.ip)
         try:
-            chromecasts, browser = pychromecast.get_listed_chromecasts(
-                friendly_names=[self._device.name],
-                discovery_timeout=self._discovery_timeout,
-            )
-            self._browser = browser
-            if not chromecasts:
-                raise CastConnectionError(
-                    f"Could not find {self._device.name!r} on the network",
-                    operation="connect",
-                    device_name=self._device.name,
+            if self._device.uuid:
+                self._cast = pychromecast.get_chromecast_from_host(
+                    (
+                        self._device.ip,
+                        self._device.port,
+                        UUID(self._device.uuid),
+                        self._device.model,
+                        self._device.name,
+                    ),
+                    timeout=self._connect_timeout,
                 )
-            self._cast = chromecasts[0]
+            else:
+                chromecasts, browser = pychromecast.get_listed_chromecasts(
+                    friendly_names=[self._device.name],
+                    discovery_timeout=self._discovery_timeout,
+                )
+                self._browser = browser
+                if not chromecasts:
+                    raise CastConnectionError(
+                        f"Could not find {self._device.name!r} on the network",
+                        operation="connect",
+                        device_name=self._device.name,
+                    )
+                self._cast = chromecasts[0]
+
             self._cast.wait(timeout=self._connect_timeout)
+            self._sync_cast_state()
         except CastConnectionError:
             self.disconnect()
             raise
@@ -93,6 +112,34 @@ class CastController:
             ) from exc
 
         logger.info("Connected to %s", self._device.name)
+
+    def _sync_cast_state(self) -> None:
+        """Refresh receiver and media state, including orphaned playback sessions."""
+        assert self._cast is not None
+        cast = self._cast
+        receiver = cast.socket_client.receiver_controller
+
+        cast.wait(timeout=self._connect_timeout)
+        receiver.update_status()
+        cast.status_event.wait(timeout=self._sync_timeout)
+
+        if cast.is_idle:
+            return
+
+        media = cast.media_controller
+        deadline = time.monotonic() + self._sync_timeout
+        while time.monotonic() < deadline:
+            media.update_status()
+            media.block_until_active(timeout=0.5)
+            status = media.status
+            if status is None:
+                time.sleep(0.2)
+                continue
+            if status.media_session_id is not None:
+                return
+            if status.player_state not in (None, "UNKNOWN"):
+                return
+            time.sleep(0.2)
 
     def play_url(
         self,
@@ -125,20 +172,41 @@ class CastController:
     def pause(self) -> None:
         self.connect()
         assert self._cast is not None
+        self._sync_cast_state()
         logger.info("Pausing %s", self._device.name)
         self._cast.media_controller.pause()
 
     def resume(self) -> None:
         self.connect()
         assert self._cast is not None
+        self._sync_cast_state()
         logger.info("Resuming %s", self._device.name)
         self._cast.media_controller.play()
 
     def stop(self) -> None:
         self.connect()
         assert self._cast is not None
+        self._sync_cast_state()
+        cast = self._cast
+        media = cast.media_controller
         logger.info("Stopping %s", self._device.name)
-        self._cast.media_controller.stop()
+
+        if media.status and media.status.media_session_id is not None:
+            try:
+                media.stop()
+                return
+            except RequestFailed as exc:
+                logger.warning(
+                    "Media stop failed on %s, trying quit_app: %s",
+                    self._device.name,
+                    exc,
+                )
+
+        if not cast.is_idle:
+            cast.quit_app()
+            return
+
+        logger.info("%s already idle", self._device.name)
 
     def set_volume(self, level: float) -> None:
         if not 0.0 <= level <= 1.0:
@@ -149,18 +217,30 @@ class CastController:
         logger.info("Setting volume on %s to %.2f", self._device.name, level)
         self._cast.set_volume(level)
 
+    def set_volume_muted(self, muted: bool) -> None:
+        self.connect()
+        assert self._cast is not None
+        logger.info("Setting mute on %s to %s", self._device.name, muted)
+        self._cast.set_volume_muted(muted)
+
     def get_status(self) -> PlaybackStatus:
         self.connect()
         assert self._cast is not None
+        self._sync_cast_state()
 
-        cast_status = self._cast.status
-        media_status = self._cast.media_controller.status
+        cast = self._cast
+        cast_status = cast.status
+        media_status = cast.media_controller.status
         volume_level = cast_status.volume_level if cast_status else None
         volume_muted = cast_status.volume_muted if cast_status else None
 
+        player_state = getattr(media_status, "player_state", None)
+        if (player_state is None or player_state == "UNKNOWN") and not cast.is_idle:
+            player_state = "ACTIVE"
+
         return PlaybackStatus(
             device_name=self._device.name,
-            player_state=getattr(media_status, "player_state", None),
+            player_state=player_state,
             content_id=getattr(media_status, "content_id", None),
             content_type=getattr(media_status, "content_type", None),
             current_time=getattr(media_status, "current_time", None),
@@ -168,6 +248,9 @@ class CastController:
             stream_type=getattr(media_status, "stream_type", None),
             volume_level=volume_level,
             volume_muted=volume_muted,
+            app_name=cast.app_display_name,
+            app_id=cast.app_id,
+            device_idle=cast.is_idle,
         )
 
     def wait_for_playback(
@@ -180,15 +263,16 @@ class CastController:
         status = self.get_status()
 
         while time.monotonic() < deadline:
-            if status.player_state in _ACTIVE_PLAYER_STATES:
+            if status.player_state in _ACTIVE_PLAYER_STATES and not status.device_idle:
                 return status
             time.sleep(poll_interval)
             status = self.get_status()
 
         logger.warning(
-            "Playback did not reach an active state within %.0fs (state=%s)",
+            "Playback did not reach an active state within %.0fs (state=%s, idle=%s)",
             timeout,
             status.player_state,
+            status.device_idle,
         )
         return status
 

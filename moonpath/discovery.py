@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import time
 
-import pychromecast
+import zeroconf
+from pychromecast.discovery import CastBrowser, SimpleCastListener
 
 from moonpath.errors import AmbiguousDeviceError, DeviceNotFoundError
 from moonpath.models import CastDevice
@@ -17,9 +19,13 @@ DEFAULT_DISCOVERY_TIMEOUT = 8.0
 def discover_devices(timeout: float = DEFAULT_DISCOVERY_TIMEOUT) -> list[CastDevice]:
     """Discover Cast devices on the local network."""
     logger.info("Discovering Cast devices (timeout=%ss)...", timeout)
-    chromecasts, browser = pychromecast.get_chromecasts(timeout=timeout)
+    zconf = zeroconf.Zeroconf()
+    browser = CastBrowser(SimpleCastListener(), zconf)
+    browser.start_discovery()
     try:
-        devices = [_chromecast_to_device(cc) for cc in chromecasts]
+        time.sleep(timeout)
+        devices = [_cast_info_to_device(cast_info) for cast_info in browser.devices.values()]
+        devices.sort(key=lambda device: device.name.casefold())
         logger.info("Found %d device(s)", len(devices))
         return devices
     finally:
@@ -50,12 +56,11 @@ def select_device(devices: list[CastDevice], name_query: str) -> CastDevice:
     return matches[0]
 
 
-def _chromecast_to_device(chromecast: pychromecast.Chromecast) -> CastDevice:
-    info = chromecast.cast_info
+def _cast_info_to_device(cast_info) -> CastDevice:
     return CastDevice(
-        name=chromecast.name,
-        ip=info.host,
-        model=info.model_name,
-        uuid=str(info.uuid) if info.uuid else None,
-        port=info.port,
+        name=cast_info.friendly_name or "unknown",
+        ip=cast_info.host,
+        model=cast_info.model_name,
+        uuid=str(cast_info.uuid) if cast_info.uuid else None,
+        port=cast_info.port,
     )
