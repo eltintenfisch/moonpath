@@ -19,12 +19,22 @@ pip install -e .
 ## Library usage
 
 ```python
-from moonpath import CastController, discover_devices
+from moonpath import (
+    AmbiguousDeviceError,
+    CastConnectionError,
+    CastController,
+    DeviceNotFoundError,
+    MoonpathError,
+    discover_devices,
+    select_device,
+)
 
 devices = discover_devices()
-controller = CastController(devices[0])
+device = select_device(devices, "Living Room speaker")
+controller = CastController(device)
 
 controller.play_url("https://example.com/test.mp3", content_type="audio/mpeg")
+controller.play_radio("https://stream.example.com/radio.mp3")
 controller.pause()
 controller.resume()
 controller.stop()
