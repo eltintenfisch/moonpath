@@ -12,6 +12,9 @@ dependencies = [
     "PyChromecast>=14.0,<15",
 ]
 
+[project.scripts]
+moonpath = "moonpath.cli_app:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["moonpath*"]

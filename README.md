@@ -2,10 +2,10 @@
 
 Standalone Python library and CLI for Google Cast control on native Ubuntu Linux.
 
-Moonpath wraps [PyChromecast](https://github.com/home-assistant-libs/pychromecast) behind a small API so other projects (like Nereid) do not need to depend on it directly.
+Moonpath wraps [PyChromecast](https://github.com/home-assistant-libs/pychromecast) behind a small API so other apps (like Nereid) do not need to depend on it directly.
 
 ```text
-Nereid → moonpath → PyChromecast → Cast device
+Nereid → moonpath CLI → PyChromecast → Cast device
 ```
 
 ## Setup
@@ -16,52 +16,94 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-## Library usage
+This installs the `moonpath` command on your PATH.
 
-```python
-from moonpath import (
-    AmbiguousDeviceError,
-    CastConnectionError,
-    CastController,
-    DeviceNotFoundError,
-    MoonpathError,
-    discover_devices,
-    select_device,
-)
+## CLI (Nereid integration boundary)
 
-devices = discover_devices()
-device = select_device(devices, "Living Room speaker")
-controller = CastController(device)
+Nereid calls Moonpath via `child_process.execFile`. Use `--json` so **stdout is JSON only**; logs go to **stderr**.
 
-controller.play_url("https://example.com/test.mp3", content_type="audio/mpeg")
-controller.play_radio("https://stream.example.com/radio.mp3")
-controller.pause()
-controller.resume()
-controller.stop()
-controller.set_volume(0.5)
-status = controller.get_status()
-controller.disconnect()
-```
-
-## CLI usage
-
-Run from the repository root:
+### Discover devices
 
 ```bash
-python cli/discover.py
-
-python cli/play_url.py --device "Living Room speaker" --url "https://example.com/test.mp3"
-
-python cli/play_radio.py --device "Living Room speaker" --url "RADIO_STREAM_URL"
-
-python cli/status.py --device "Living Room speaker"
+moonpath discover --json
 ```
 
-`play_url.py` and `play_radio.py` start playback, print status, then accept simple interactive commands:
+```json
+{
+  "ok": true,
+  "operation": "discover",
+  "devices": [
+    {
+      "id": "16cd470e-91cf-46f5-876f-8e8db75d6380",
+      "name": "Living Room speaker",
+      "host": "192.168.1.50",
+      "model": "Chromecast Audio",
+      "port": 8009
+    }
+  ]
+}
+```
 
-`pause` | `resume` | `stop` | `volume <0.0-1.0>` | `status` | `quit`
+Device `id` is the Cast UUID. Use it for all other commands via `--device-id`.
 
-Device names are matched case-insensitively by substring. If multiple devices match, the CLI reports an error.
+### Status
+
+```bash
+moonpath status --device-id <uuid> --json
+```
+
+### Play URL (file, podcast)
+
+```bash
+moonpath play-url --device-id <uuid> --url "https://example.com/track.mp3" --json
+```
+
+`--content-type` is optional (inferred from URL extension).
+
+### Play radio
+
+```bash
+moonpath play-radio --device-id <uuid> --url "https://stream.example.com/radio.mp3" --json
+```
+
+### Transport and volume
+
+```bash
+moonpath pause  --device-id <uuid> --json
+moonpath resume --device-id <uuid> --json
+moonpath stop   --device-id <uuid> --json
+moonpath volume --device-id <uuid> --level 0.5 --json
+```
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success — parse JSON from stdout |
+| non-zero | Failure — parse JSON from stdout if `--json`, details also on stderr |
+
+### Error JSON
+
+```json
+{
+  "ok": false,
+  "operation": "play-url",
+  "error": {
+    "type": "DeviceNotFound",
+    "message": "No device found for id '...'"
+  }
+}
+```
+
+Error types: `DeviceNotFound`, `AmbiguousDevice`, `ConnectionFailed`, `PlaybackFailed`, `InvalidArgument`, `InternalError`.
+
+## Python library (optional)
+
+Moonpath can also be used as a Python library. The CLI is the stable integration boundary for Nereid.
+
+```python
+from moonpath import CastController, discover_devices, select_device
+```
 
 ## Target devices
 

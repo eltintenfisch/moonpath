@@ -56,6 +56,22 @@ def select_device(devices: list[CastDevice], name_query: str) -> CastDevice:
     return matches[0]
 
 
+def resolve_device_by_id(
+    device_id: str,
+    timeout: float = DEFAULT_DISCOVERY_TIMEOUT,
+) -> CastDevice:
+    """Find a device by Cast UUID."""
+    query = device_id.strip()
+    for device in discover_devices(timeout=timeout):
+        if device.uuid == query:
+            return device
+
+    raise DeviceNotFoundError(
+        f"No device found for id {query!r}",
+        operation="resolve_device",
+    )
+
+
 def _cast_info_to_device(cast_info) -> CastDevice:
     return CastDevice(
         name=cast_info.friendly_name or "unknown",
