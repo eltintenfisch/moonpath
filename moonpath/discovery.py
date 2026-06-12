@@ -60,7 +60,7 @@ def resolve_device_by_id(
     device_id: str,
     timeout: float = DEFAULT_DISCOVERY_TIMEOUT,
 ) -> CastDevice:
-    """Find a device by Cast UUID."""
+    """Find a device by Cast UUID via mDNS discovery."""
     query = device_id.strip()
     for device in discover_devices(timeout=timeout):
         if device.uuid == query:
@@ -70,6 +70,33 @@ def resolve_device_by_id(
         f"No device found for id {query!r}",
         operation="resolve_device",
     )
+
+
+def resolve_device(
+    device_id: str,
+    *,
+    host: str | None = None,
+    port: int | None = None,
+    name: str | None = None,
+    model: str | None = None,
+    discovery_timeout: float = DEFAULT_DISCOVERY_TIMEOUT,
+) -> CastDevice:
+    """Resolve a device by UUID, using a cached host when provided."""
+    query = device_id.strip()
+    if not query:
+        raise DeviceNotFoundError("device id is required", operation="resolve_device")
+
+    host_value = (host or "").strip()
+    if host_value:
+        return CastDevice(
+            name=(name or "cast-device").strip() or "cast-device",
+            ip=host_value,
+            port=port if port is not None else 8009,
+            uuid=query,
+            model=model,
+        )
+
+    return resolve_device_by_id(query, timeout=discovery_timeout)
 
 
 def _cast_info_to_device(cast_info) -> CastDevice:

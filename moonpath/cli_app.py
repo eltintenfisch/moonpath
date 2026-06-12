@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from moonpath.controller import CastController, guess_content_type
-from moonpath.discovery import DEFAULT_DISCOVERY_TIMEOUT, discover_devices, resolve_device_by_id
+from moonpath.discovery import DEFAULT_DISCOVERY_TIMEOUT, discover_devices, resolve_device
 from moonpath.errors import log_failure, setup_logging
 from moonpath.json_api import (
     device_to_json,
@@ -26,6 +26,19 @@ def build_parser() -> argparse.ArgumentParser:
     parent.add_argument("--verbose", action="store_true", help="Enable debug logging on stderr")
     parent.add_argument("--json", action="store_true", help="Emit JSON on stdout")
 
+    device_parent = argparse.ArgumentParser(add_help=False)
+    device_parent.add_argument("--device-id", required=True, help="Cast device UUID")
+    device_parent.add_argument(
+        "--device-host",
+        help="Device IP/hostname from discover (skips mDNS scan when set)",
+    )
+    device_parent.add_argument(
+        "--device-port",
+        type=int,
+        default=8009,
+        help="Cast port from discover (default: 8009)",
+    )
+
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     discover = subparsers.add_parser(
@@ -40,20 +53,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Discovery timeout in seconds",
     )
 
-    status = subparsers.add_parser("status", parents=[parent], help="Show playback status")
-    status.add_argument("--device-id", required=True, help="Cast device UUID")
+    subparsers.add_parser(
+        "status",
+        parents=[parent, device_parent],
+        help="Show playback status",
+    )
 
-    play_url = subparsers.add_parser("play-url", parents=[parent], help="Play a media URL")
-    play_url.add_argument("--device-id", required=True, help="Cast device UUID")
+    play_url = subparsers.add_parser("play-url", parents=[parent, device_parent], help="Play a media URL")
     play_url.add_argument("--url", required=True, help="Media URL")
     play_url.add_argument("--content-type", help="MIME type (inferred from URL if omitted)")
+    play_url.add_argument(
+        "--position",
+        type=float,
+        help="Start position in seconds (buffered media only)",
+    )
 
     play_radio = subparsers.add_parser(
         "play-radio",
-        parents=[parent],
+        parents=[parent, device_parent],
         help="Play an internet radio stream",
     )
-    play_radio.add_argument("--device-id", required=True, help="Cast device UUID")
     play_radio.add_argument("--url", required=True, help="Radio stream URL")
     play_radio.add_argument(
         "--content-type",
@@ -61,18 +80,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="MIME type (default: audio/mpeg)",
     )
 
-    pause = subparsers.add_parser("pause", parents=[parent], help="Pause playback")
-    pause.add_argument("--device-id", required=True, help="Cast device UUID")
+    subparsers.add_parser("pause", parents=[parent, device_parent], help="Pause playback")
+    subparsers.add_parser("resume", parents=[parent, device_parent], help="Resume playback")
+    subparsers.add_parser("stop", parents=[parent, device_parent], help="Stop playback")
 
-    resume = subparsers.add_parser("resume", parents=[parent], help="Resume playback")
-    resume.add_argument("--device-id", required=True, help="Cast device UUID")
+    seek = subparsers.add_parser("seek", parents=[parent, device_parent], help="Seek buffered media")
+    seek.add_argument(
+        "--position",
+        type=float,
+        required=True,
+        help="Position in seconds from the start of the track",
+    )
 
-    stop = subparsers.add_parser("stop", parents=[parent], help="Stop playback")
-    stop.add_argument("--device-id", required=True, help="Cast device UUID")
-
-    volume = subparsers.add_parser("volume", parents=[parent], help="Set playback volume")
-    volume.add_argument("--device-id", required=True, help="Cast device UUID")
+    volume = subparsers.add_parser("volume", parents=[parent, device_parent], help="Set playback volume")
     volume.add_argument("--level", type=float, required=True, help="Volume level 0.0-1.0")
+
+    mute = subparsers.add_parser("mute", parents=[parent, device_parent], help="Mute or unmute playback")
+    mute.add_argument(
+        "--muted",
+        choices=("true", "false"),
+        required=True,
+        help="true to mute, false to unmute",
+    )
 
     return parser
 
@@ -90,7 +119,9 @@ def main(argv: list[str] | None = None) -> None:
         "pause": cmd_pause,
         "resume": cmd_resume,
         "stop": cmd_stop,
+        "seek": cmd_seek,
         "volume": cmd_volume,
+        "mute": cmd_mute,
     }
 
     operation = args.command
@@ -147,8 +178,18 @@ def _emit_human(operation: str, result: dict[str, Any]) -> None:
         _emit_human("discover", result)
 
 
-def with_controller(device_id: str, fn: Callable[[CastController, CastDevice], Any]) -> dict[str, Any]:
-    device = resolve_device_by_id(device_id)
+def _resolve_from_args(args: argparse.Namespace) -> CastDevice:
+    host = getattr(args, "device_host", None)
+    port = getattr(args, "device_port", None)
+    return resolve_device(
+        args.device_id,
+        host=host,
+        port=port,
+    )
+
+
+def with_controller(args: argparse.Namespace, fn: Callable[[CastController, CastDevice], Any]) -> dict[str, Any]:
+    device = _resolve_from_args(args)
     controller = CastController(device)
     try:
         return fn(controller, device)
@@ -173,18 +214,19 @@ def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
         assert device.uuid is not None
         return {"status": status_to_json(status, device.uuid)}
 
-    return with_controller(args.device_id, run)
+    return with_controller(args, run)
 
 
 def cmd_play_url(args: argparse.Namespace) -> dict[str, Any]:
     def run(controller: CastController, device: CastDevice) -> dict[str, Any]:
         content_type = args.content_type or guess_content_type(args.url)
-        controller.play_url(args.url, content_type=content_type)
+        start_position = args.position if args.position is not None and args.position > 0 else None
+        controller.play_url(args.url, content_type=content_type, start_position=start_position)
         status = controller.wait_for_playback()
         assert device.uuid is not None
         return {"status": status_to_json(status, device.uuid)}
 
-    return with_controller(args.device_id, run)
+    return with_controller(args, run)
 
 
 def cmd_play_radio(args: argparse.Namespace) -> dict[str, Any]:
@@ -195,7 +237,7 @@ def cmd_play_radio(args: argparse.Namespace) -> dict[str, Any]:
         assert device.uuid is not None
         return {"status": status_to_json(status, device.uuid)}
 
-    return with_controller(args.device_id, run)
+    return with_controller(args, run)
 
 
 def cmd_pause(args: argparse.Namespace) -> dict[str, Any]:
@@ -205,7 +247,7 @@ def cmd_pause(args: argparse.Namespace) -> dict[str, Any]:
         assert device.uuid is not None
         return {"status": status_to_json(status, device.uuid)}
 
-    return with_controller(args.device_id, run)
+    return with_controller(args, run)
 
 
 def cmd_resume(args: argparse.Namespace) -> dict[str, Any]:
@@ -215,7 +257,7 @@ def cmd_resume(args: argparse.Namespace) -> dict[str, Any]:
         assert device.uuid is not None
         return {"status": status_to_json(status, device.uuid)}
 
-    return with_controller(args.device_id, run)
+    return with_controller(args, run)
 
 
 def cmd_stop(args: argparse.Namespace) -> dict[str, Any]:
@@ -225,7 +267,17 @@ def cmd_stop(args: argparse.Namespace) -> dict[str, Any]:
         assert device.uuid is not None
         return {"status": status_to_json(status, device.uuid)}
 
-    return with_controller(args.device_id, run)
+    return with_controller(args, run)
+
+
+def cmd_seek(args: argparse.Namespace) -> dict[str, Any]:
+    def run(controller: CastController, device: CastDevice) -> dict[str, Any]:
+        controller.seek(args.position)
+        status = controller.get_status()
+        assert device.uuid is not None
+        return {"status": status_to_json(status, device.uuid)}
+
+    return with_controller(args, run)
 
 
 def cmd_volume(args: argparse.Namespace) -> dict[str, Any]:
@@ -241,7 +293,23 @@ def cmd_volume(args: argparse.Namespace) -> dict[str, Any]:
             "status": status_to_json(status, device.uuid),
         }
 
-    return with_controller(args.device_id, run)
+    return with_controller(args, run)
+
+
+def cmd_mute(args: argparse.Namespace) -> dict[str, Any]:
+    def run(controller: CastController, device: CastDevice) -> dict[str, Any]:
+        controller.set_volume_muted(args.muted == "true")
+        status = controller.get_status()
+        assert device.uuid is not None
+        return {
+            "volume": {
+                "level": status.volume_level,
+                "muted": status.volume_muted,
+            },
+            "status": status_to_json(status, device.uuid),
+        }
+
+    return with_controller(args, run)
 
 
 if __name__ == "__main__":

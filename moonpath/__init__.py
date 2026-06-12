@@ -1,7 +1,7 @@
 """Moonpath: Google Cast control library."""
 
 from moonpath.controller import CastController
-from moonpath.discovery import discover_devices, select_device
+from moonpath.discovery import discover_devices, resolve_device, select_device
 from moonpath.errors import (
     AmbiguousDeviceError,
     CastConnectionError,
@@ -19,5 +19,6 @@ __all__ = [
     "MoonpathError",
     "PlaybackStatus",
     "discover_devices",
+    "resolve_device",
     "select_device",
 ]

@@ -52,6 +52,18 @@ Device `id` is the Cast UUID. Use it for all other commands via `--device-id`.
 moonpath status --device-id <uuid> --json
 ```
 
+### Faster commands with a cached device address
+
+After `discover`, callers may pass `--device-host` and optionally `--device-port` on any
+`--device-id` command to connect directly and **skip the 8s mDNS scan**:
+
+```bash
+moonpath status --device-id <uuid> --device-host 192.168.1.50 --device-port 8009 --json
+moonpath play-url --device-id <uuid> --device-host 192.168.1.50 --url "https://example.com/track.mp3" --json
+```
+
+If `--device-host` is omitted, moonpath discovers devices as before.
+
 `status.player_state` values:
 
 | Value | Meaning |
@@ -69,9 +81,10 @@ Other useful `status` fields: `device_idle`, `content_id`, `stream_type` (`BUFFE
 
 ```bash
 moonpath play-url --device-id <uuid> --url "https://example.com/track.mp3" --json
+moonpath play-url --device-id <uuid> --url "https://example.com/book.m4b" --position 3600 --json
 ```
 
-`--content-type` is optional (inferred from URL extension).
+`--content-type` is optional (inferred from URL extension). `--position` starts buffered media at that offset (seconds).
 
 ### Play radio
 
@@ -85,8 +98,12 @@ moonpath play-radio --device-id <uuid> --url "https://stream.example.com/radio.m
 moonpath pause  --device-id <uuid> --json
 moonpath resume --device-id <uuid> --json
 moonpath stop   --device-id <uuid> --json
+moonpath seek   --device-id <uuid> --position 120.5 --json
 moonpath volume --device-id <uuid> --level 0.5 --json
+moonpath mute   --device-id <uuid> --muted true --json
 ```
+
+`seek` applies to buffered media (tracks, podcasts). It fails for live radio streams (`stream_type: LIVE`).
 
 ### Exit codes
 

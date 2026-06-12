@@ -147,19 +147,29 @@ class CastController:
         *,
         content_type: str | None = None,
         stream_type: str = "BUFFERED",
+        start_position: float | None = None,
     ) -> None:
         self.connect()
         assert self._cast is not None
 
         resolved_type = content_type or guess_content_type(url)
+        current_time = None
+        if start_position is not None and start_position > 0:
+            current_time = float(start_position)
         logger.info(
-            "Playing URL on %s (%s, %s)",
+            "Playing URL on %s (%s, %s%s)",
             self._device.name,
             resolved_type,
             stream_type,
+            f", start={current_time:.1f}s" if current_time is not None else "",
         )
         media = self._cast.media_controller
-        media.play_media(url, resolved_type, stream_type=stream_type)
+        media.play_media(
+            url,
+            resolved_type,
+            stream_type=stream_type,
+            current_time=current_time,
+        )
         media.block_until_active()
 
     def play_radio(self, url: str, *, content_type: str | None = None) -> None:
@@ -182,6 +192,26 @@ class CastController:
         self._sync_cast_state()
         logger.info("Resuming %s", self._device.name)
         self._cast.media_controller.play()
+
+    def seek(self, position: float) -> None:
+        if position < 0:
+            raise ValueError(f"Position must be >= 0, got {position}")
+
+        self.connect()
+        assert self._cast is not None
+        self._sync_cast_state()
+        media = self._cast.media_controller
+        status = media.status
+
+        if status and getattr(status, "stream_type", None) == "LIVE":
+            raise ValueError("Cannot seek live streams")
+
+        duration = getattr(status, "duration", None)
+        if isinstance(duration, (int, float)) and duration > 0:
+            position = min(position, float(duration))
+
+        logger.info("Seeking %s to %.1fs", self._device.name, position)
+        media.seek(position)
 
     def stop(self) -> None:
         self.connect()
