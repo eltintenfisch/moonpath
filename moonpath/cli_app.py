@@ -67,6 +67,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="Start position in seconds (buffered media only)",
     )
+    play_url.add_argument("--subtitles-url", help="WebVTT subtitles URL for Cast")
+    play_url.add_argument(
+        "--subtitles-lang",
+        default="en-US",
+        help="Subtitle language tag (default: en-US)",
+    )
 
     play_radio = subparsers.add_parser(
         "play-radio",
@@ -221,7 +227,14 @@ def cmd_play_url(args: argparse.Namespace) -> dict[str, Any]:
     def run(controller: CastController, device: CastDevice) -> dict[str, Any]:
         content_type = args.content_type or guess_content_type(args.url)
         start_position = args.position if args.position is not None and args.position > 0 else None
-        controller.play_url(args.url, content_type=content_type, start_position=start_position)
+        subtitles_url = args.subtitles_url.strip() if args.subtitles_url else None
+        controller.play_url(
+            args.url,
+            content_type=content_type,
+            start_position=start_position,
+            subtitles_url=subtitles_url,
+            subtitles_lang=args.subtitles_lang,
+        )
         status = controller.wait_for_playback()
         assert device.uuid is not None
         return {"status": status_to_json(status, device.uuid)}

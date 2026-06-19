@@ -38,6 +38,10 @@ _CONTENT_TYPES = {
 }
 
 
+def is_video_content_type(content_type: str) -> bool:
+    return content_type.casefold().startswith("video/")
+
+
 def guess_content_type(url: str, default: str = "audio/mpeg") -> str:
     """Guess MIME type from a URL path extension."""
     path = urlparse(url).path
@@ -148,6 +152,8 @@ class CastController:
         content_type: str | None = None,
         stream_type: str = "BUFFERED",
         start_position: float | None = None,
+        subtitles_url: str | None = None,
+        subtitles_lang: str = "en-US",
     ) -> None:
         self.connect()
         assert self._cast is not None
@@ -156,21 +162,74 @@ class CastController:
         current_time = None
         if start_position is not None and start_position > 0:
             current_time = float(start_position)
+
+        if not subtitles_url and is_video_content_type(resolved_type):
+            self._reset_receiver_before_subtitle_free_video()
+
+        subtitle_detail = (
+            f", subtitles={subtitles_url}"
+            if subtitles_url
+            else ", no subtitles"
+            if is_video_content_type(resolved_type)
+            else ""
+        )
         logger.info(
-            "Playing URL on %s (%s, %s%s)",
+            "Playing URL on %s (%s, %s%s%s)",
             self._device.name,
             resolved_type,
             stream_type,
             f", start={current_time:.1f}s" if current_time is not None else "",
+            subtitle_detail,
         )
         media = self._cast.media_controller
-        media.play_media(
-            url,
-            resolved_type,
-            stream_type=stream_type,
-            current_time=current_time,
-        )
+        if subtitles_url:
+            media.play_media(
+                url,
+                resolved_type,
+                stream_type=stream_type,
+                current_time=current_time,
+                subtitles=subtitles_url,
+                subtitles_lang=subtitles_lang,
+                subtitles_mime="text/vtt",
+            )
+        else:
+            media.play_media(
+                url,
+                resolved_type,
+                stream_type=stream_type,
+                current_time=current_time,
+            )
         media.block_until_active()
+
+    def _reset_receiver_before_subtitle_free_video(self) -> None:
+        """Tear down the Cast receiver so a direct film switch drops prior subtitle tracks."""
+        assert self._cast is not None
+        self._sync_cast_state()
+        cast = self._cast
+        if cast.is_idle:
+            return
+
+        media = cast.media_controller
+        logger.info("Resetting %s receiver before subtitle-free video load", self._device.name)
+        try:
+            if media.status and media.status.media_session_id is not None:
+                media.stop()
+        except RequestFailed as exc:
+            logger.warning(
+                "Media stop failed on %s before subtitle-free load: %s",
+                self._device.name,
+                exc,
+            )
+
+        time.sleep(0.3)
+        self._sync_cast_state()
+        if cast.is_idle:
+            return
+
+        logger.info("Quitting media receiver on %s", self._device.name)
+        cast.quit_app()
+        time.sleep(0.5)
+        self._sync_cast_state()
 
     def play_radio(self, url: str, *, content_type: str | None = None) -> None:
         self.play_url(
