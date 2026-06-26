@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from collections.abc import Callable
 from typing import Any
 
-from moonpath.controller import CastController, guess_content_type
+from moonpath.controller import (
+    CastController,
+    DEFAULT_PLAYBACK_WAIT_TIMEOUT,
+    HLS_PLAYBACK_WAIT_TIMEOUT,
+    guess_content_type,
+    is_hls_url,
+)
 from moonpath.discovery import DEFAULT_DISCOVERY_TIMEOUT, discover_devices, resolve_device
 from moonpath.errors import log_failure, setup_logging
+from moonpath import telemetry
 from moonpath.json_api import (
     device_to_json,
     error_payload,
@@ -63,11 +71,21 @@ def build_parser() -> argparse.ArgumentParser:
     play_url.add_argument("--url", required=True, help="Media URL")
     play_url.add_argument("--content-type", help="MIME type (inferred from URL if omitted)")
     play_url.add_argument(
+        "--stream-type",
+        choices=("BUFFERED", "LIVE"),
+        help="Cast stream type (default: LIVE for HLS, BUFFERED otherwise)",
+    )
+    play_url.add_argument(
         "--position",
         type=float,
         help="Start position in seconds (buffered media only)",
     )
     play_url.add_argument("--subtitles-url", help="WebVTT subtitles URL for Cast")
+    play_url.add_argument(
+        "--replace",
+        action="store_true",
+        help="Load in the active receiver without quit_app (e.g. next album track)",
+    )
     play_url.add_argument(
         "--subtitles-lang",
         default="en-US",
@@ -131,11 +149,45 @@ def main(argv: list[str] | None = None) -> None:
     }
 
     operation = args.command
+    device_id = getattr(args, "device_id", None)
+    trace_id = telemetry.new_trace_id()
+    start_ms = time.monotonic() * 1000
+
+    telemetry.emit(
+        event_name="command.start",
+        body=f"{operation} started",
+        trace_id=trace_id,
+        entity="cast_device",
+        entity_id=device_id,
+        attributes={"operation": operation, **({"device_id": device_id} if device_id else {})},
+    )
+
     try:
         result = handlers[operation](args)
     except Exception as exc:
+        duration_ms = time.monotonic() * 1000 - start_ms
+        telemetry.emit_error(
+            event_name="command.error",
+            body=f"{operation} failed",
+            exc=exc,
+            trace_id=trace_id,
+            entity="cast_device",
+            entity_id=device_id,
+            duration_ms=duration_ms,
+            attributes={"operation": operation, **({"device_id": device_id} if device_id else {})},
+        )
         sys.exit(fail(operation, exc, json_mode=args.json))
 
+    duration_ms = time.monotonic() * 1000 - start_ms
+    telemetry.emit(
+        event_name="command.success",
+        body=f"{operation} completed",
+        trace_id=trace_id,
+        entity="cast_device",
+        entity_id=device_id,
+        duration_ms=duration_ms,
+        attributes={"operation": operation, **({"device_id": device_id} if device_id else {})},
+    )
     emit_success(operation, result, json_mode=args.json)
 
 
@@ -228,14 +280,20 @@ def cmd_play_url(args: argparse.Namespace) -> dict[str, Any]:
         content_type = args.content_type or guess_content_type(args.url)
         start_position = args.position if args.position is not None and args.position > 0 else None
         subtitles_url = args.subtitles_url.strip() if args.subtitles_url else None
+        stream_type = args.stream_type or ("LIVE" if is_hls_url(args.url, content_type) else "BUFFERED")
+        playback_timeout = (
+            HLS_PLAYBACK_WAIT_TIMEOUT if stream_type == "LIVE" else DEFAULT_PLAYBACK_WAIT_TIMEOUT
+        )
         controller.play_url(
             args.url,
             content_type=content_type,
+            stream_type=stream_type,
             start_position=start_position,
             subtitles_url=subtitles_url,
             subtitles_lang=args.subtitles_lang,
+            replace_in_place=bool(args.replace),
         )
-        status = controller.wait_for_playback()
+        status = controller.wait_for_playback(timeout=playback_timeout)
         assert device.uuid is not None
         return {"status": status_to_json(status, device.uuid)}
 
