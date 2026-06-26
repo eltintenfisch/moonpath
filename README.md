@@ -1,11 +1,11 @@
 # moonpath
 
-Standalone Python library and CLI for Google Cast control on native Ubuntu Linux.
+Standalone Python library and HTTP service for Google Cast control on native Ubuntu Linux.
 
-Moonpath wraps [PyChromecast](https://github.com/home-assistant-libs/pychromecast) behind a small API so other apps (like Nereid) do not need to depend on it directly.
+Moonpath wraps [PyChromecast](https://github.com/home-assistant-libs/pychromecast) behind a REST API so other apps (like Nereid) do not need to depend on it directly.
 
 ```text
-Nereid → moonpath CLI → PyChromecast → Cast device
+Nereid → HTTP → Moonpath service → PyChromecast → Cast device
 ```
 
 ## Setup
@@ -16,55 +16,72 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-This installs the `moonpath` command on your PATH.
-
-## CLI (Nereid integration boundary)
-
-Nereid calls Moonpath via `child_process.execFile`. Use `--json` so **stdout is JSON only**; logs go to **stderr**.
-
-### Discover devices
+## Running the service
 
 ```bash
-moonpath discover --json
+uvicorn moonpath.service:app --host 127.0.0.1 --port 8001
 ```
+
+Or via systemd (recommended):
+
+```bash
+systemctl --user enable --now moonpath
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MOONPATH_PORT` | `8001` | Port to listen on |
+
+## HTTP API
+
+All endpoints accept and return JSON. Pass `X-Request-ID` / `X-Trace-ID` headers for telemetry correlation.
+
+### `GET /health`
+
+```json
+{ "status": "ok", "active_connections": ["<uuid>"] }
+```
+
+### `GET /devices`
+
+Discovers Cast devices on the network (~5s scan).
 
 ```json
 {
-  "ok": true,
-  "operation": "discover",
   "devices": [
     {
       "id": "16cd470e-91cf-46f5-876f-8e8db75d6380",
       "name": "Living Room speaker",
       "host": "192.168.1.50",
-      "model": "Chromecast Audio",
-      "port": 8009
+      "port": 8009,
+      "model": "Chromecast Audio"
     }
   ]
 }
 ```
 
-Device `id` is the Cast UUID. Use it for all other commands via `--device-id`.
+### `GET /devices/{device_id}/status`
 
-### Status
+Query params: `host` (optional if cached), `port` (default 8009)
 
-```bash
-moonpath status --device-id <uuid> --json
+```json
+{
+  "device_id": "16cd470e-...",
+  "device_idle": false,
+  "player_state": "PLAYING",
+  "content_id": "https://example.com/track.mp3",
+  "content_type": "audio/mpeg",
+  "current_time": 142.3,
+  "duration": 3600.0,
+  "stream_type": "BUFFERED",
+  "volume_level": 0.5,
+  "volume_muted": false
+}
 ```
 
-### Faster commands with a cached device address
-
-After `discover`, callers may pass `--device-host` and optionally `--device-port` on any
-`--device-id` command to connect directly and **skip the 8s mDNS scan**:
-
-```bash
-moonpath status --device-id <uuid> --device-host 192.168.1.50 --device-port 8009 --json
-moonpath play-url --device-id <uuid> --device-host 192.168.1.50 --url "https://example.com/track.mp3" --json
-```
-
-If `--device-host` is omitted, moonpath discovers devices as before.
-
-`status.player_state` values:
+`player_state` values:
 
 | Value | Meaning |
 |-------|---------|
@@ -75,110 +92,104 @@ If `--device-host` is omitted, moonpath discovers devices as before.
 | `IDLE` | Stopped / no active media |
 | `UNKNOWN` | No media session (common when `device_idle` is true) |
 
-Other useful `status` fields: `device_idle`, `content_id`, `stream_type` (`BUFFERED` / `LIVE`), `volume_level`, `volume_muted`.
-
-### Play URL (file, podcast)
-
-```bash
-moonpath play-url --device-id <uuid> --url "https://example.com/track.mp3" --json
-moonpath play-url --device-id <uuid> --url "https://example.com/book.m4b" --position 3600 --json
-```
-
-`--content-type` is optional (inferred from URL extension). `--position` starts buffered media at that offset (seconds).
-
-### Play radio
-
-```bash
-moonpath play-radio --device-id <uuid> --url "https://stream.example.com/radio.mp3" --json
-```
-
-### Transport and volume
-
-```bash
-moonpath pause  --device-id <uuid> --json
-moonpath resume --device-id <uuid> --json
-moonpath stop   --device-id <uuid> --json
-moonpath seek   --device-id <uuid> --position 120.5 --json
-moonpath volume --device-id <uuid> --level 0.5 --json
-moonpath mute   --device-id <uuid> --muted true --json
-```
-
-`seek` applies to buffered media (tracks, podcasts). It fails for live radio streams (`stream_type: LIVE`).
-
-### Exit codes
-
-| Code | Meaning |
-|------|---------|
-| `0` | Success — `ok: true` JSON on stdout |
-| non-zero | Failure — `ok: false` JSON on stdout (when `--json`), logs on stderr |
-
-On failure, Moonpath **always exits non-zero**, even when stdout contains valid error JSON. Node `execFile` will reject; read JSON from `err.stdout`.
-
-### Error JSON
+### `POST /devices/{device_id}/play-url`
 
 ```json
 {
-  "ok": false,
-  "operation": "play-url",
-  "error": {
-    "type": "DeviceNotFound",
-    "message": "No device found for id '...'"
-  }
+  "host": "192.168.1.50",
+  "url": "https://example.com/track.mp3",
+  "content_type": "audio/mpeg",
+  "stream_type": "BUFFERED",
+  "position": 3600.0,
+  "subtitles_url": "https://example.com/subs.vtt",
+  "subtitles_lang": "en-US",
+  "replace": false
 }
 ```
 
-Error types: `DeviceNotFound`, `AmbiguousDevice`, `ConnectionFailed`, `PlaybackFailed`, `InvalidArgument`, `InternalError`.
+`host` is required on first connect; omit once the service has a cached connection. Returns a status object.
 
-### Nereid (Node.js) caller
+### `POST /devices/{device_id}/play-radio`
 
-Binary resolution:
-
-```javascript
-const MOONPATH = config.moonpathBin ?? process.env.MOONPATH_BIN ?? "moonpath";
+```json
+{ "host": "192.168.1.50", "url": "https://stream.example.com/radio.mp3", "content_type": "audio/mpeg" }
 ```
 
-Wrapper (`execFile` rejects on non-zero exit):
+### `POST /devices/{device_id}/pause`
+### `POST /devices/{device_id}/resume`
+### `POST /devices/{device_id}/stop`
 
-```javascript
-const { execFile } = require("child_process");
-const { promisify } = require("util");
-const execFileAsync = promisify(execFile);
+Body: `{ "host": "192.168.1.50" }` (optional if cached). Returns a status object.
 
-async function moonpath(...args) {
-  let stdout;
-  try {
-    ({ stdout } = await execFileAsync(MOONPATH, [...args, "--json"]));
-  } catch (e) {
-    stdout = e.stdout ?? "";
-    if (!stdout) throw e;
-  }
-  const result = JSON.parse(stdout);
-  if (!result.ok) {
-    const err = new Error(result.error.message);
-    err.code = result.error.type;
-    err.operation = result.operation;
-    throw err;
-  }
-  return result;
-}
+### `POST /devices/{device_id}/seek`
+
+```json
+{ "host": "192.168.1.50", "position": 120.5 }
 ```
 
-Is something playing?
+Applies to buffered media only. Returns a status object.
 
-```javascript
-const s = result.status;
-const playing =
-  !s.device_idle &&
-  ["PLAYING", "PAUSED", "BUFFERING", "ACTIVE"].includes(s.player_state);
+### `POST /devices/{device_id}/volume`
+
+```json
+{ "host": "192.168.1.50", "level": 0.5 }
 ```
 
-## Python library (optional)
+`level` must be between 0.0 and 1.0. Returns `{ "volume": { "level": 0.5, "muted": false }, "status": {...} }`.
 
-Moonpath can also be used as a Python library. The CLI is the stable integration boundary for Nereid.
+### `POST /devices/{device_id}/mute`
 
-```python
-from moonpath import CastController, discover_devices, select_device
+```json
+{ "host": "192.168.1.50", "muted": true }
 ```
+
+Returns `{ "volume": { "level": 0.5, "muted": true }, "status": {...} }`.
+
+## Error responses
+
+All errors return an appropriate HTTP status code with:
+
+```json
+{ "detail": "No device found for id '...'" }
+```
+
+| HTTP status | Meaning |
+|-------------|---------|
+| `400` | Invalid argument |
+| `404` | Device not found |
+| `409` | Ambiguous device match |
+| `503` | Connection failed |
+| `502` | Playback failed |
+| `500` | Internal error |
+
+## Connection pool
+
+The service maintains one persistent PyChromecast connection per device. Connections are reused across requests, eliminating the mDNS discovery overhead on every command. On a stale connection the service reconnects once automatically before returning an error.
+
+## Nereid integration
+
+Nereid resolves the service URL from the `moonpath_url` DB key, `MOONPATH_URL` env var, or defaults to `http://localhost:8001`.
+
+```typescript
+const res = await fetch(`${serviceUrl}/devices/${deviceId}/play-url`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ host, url, content_type: contentType }),
+});
+```
+
+## CLI
+
+A `moonpath` CLI is still available for manual use and debugging:
+
+```bash
+moonpath discover
+moonpath status --device-id <uuid> --device-host 192.168.1.50
+moonpath play-url --device-id <uuid> --device-host 192.168.1.50 --url "https://example.com/track.mp3"
+moonpath pause --device-id <uuid> --device-host 192.168.1.50
+```
+
+The CLI is not used by Nereid; it connects and disconnects per command with no connection pooling.
 
 ## Target devices
 

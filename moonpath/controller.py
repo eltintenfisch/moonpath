@@ -21,6 +21,15 @@ logger = logging.getLogger("moonpath")
 DEFAULT_PLAYBACK_WAIT_TIMEOUT = 15.0
 DEFAULT_SYNC_TIMEOUT = 5.0
 _ACTIVE_PLAYER_STATES = frozenset({"PLAYING", "PAUSED", "BUFFERING", "ACTIVE"})
+_HLS_CONTENT_TYPES = frozenset(
+    {
+        "application/vnd.apple.mpegurl",
+        "application/x-mpegurl",
+        "audio/mpegurl",
+        "audio/x-mpegurl",
+    },
+)
+HLS_PLAYBACK_WAIT_TIMEOUT = 30.0
 
 _CONTENT_TYPES = {
     ".mp3": "audio/mpeg",
@@ -47,6 +56,29 @@ def guess_content_type(url: str, default: str = "audio/mpeg") -> str:
     path = urlparse(url).path
     suffix = PurePosixPath(path).suffix.casefold()
     return _CONTENT_TYPES.get(suffix, default)
+
+
+def is_hls_url(url: str, content_type: str | None = None) -> bool:
+    resolved = (content_type or guess_content_type(url)).casefold()
+    if resolved in _HLS_CONTENT_TYPES:
+        return True
+    return PurePosixPath(urlparse(url).path).suffix.casefold() == ".m3u8"
+
+
+def normalize_player_state(
+    *,
+    device_idle: bool,
+    player_state: str | None,
+    media_session_id: int | None,
+) -> str | None:
+    """Map Default Media Receiver quirks to states Nereid can treat as active."""
+    if device_idle:
+        return player_state
+    if media_session_id is not None and player_state in (None, "UNKNOWN", "IDLE"):
+        return "BUFFERING"
+    if player_state in (None, "UNKNOWN"):
+        return "ACTIVE"
+    return player_state
 
 
 class CastController:
@@ -154,6 +186,7 @@ class CastController:
         start_position: float | None = None,
         subtitles_url: str | None = None,
         subtitles_lang: str = "en-US",
+        replace_in_place: bool = False,
     ) -> None:
         self.connect()
         assert self._cast is not None
@@ -163,8 +196,10 @@ class CastController:
         if start_position is not None and start_position > 0:
             current_time = float(start_position)
 
-        if not subtitles_url and is_video_content_type(resolved_type):
-            self._reset_receiver_before_subtitle_free_video()
+        if not replace_in_place:
+            self._prepare_for_new_media()
+            if not subtitles_url and is_video_content_type(resolved_type):
+                self._reset_receiver_before_subtitle_free_video()
 
         subtitle_detail = (
             f", subtitles={subtitles_url}"
@@ -199,7 +234,43 @@ class CastController:
                 stream_type=stream_type,
                 current_time=current_time,
             )
-        media.block_until_active()
+        media.block_until_active(timeout=self._connect_timeout)
+
+    def _prepare_for_new_media(self) -> None:
+        """Stop the current Cast session so a new play replaces what's on the TV."""
+        assert self._cast is not None
+        self._sync_cast_state()
+        cast = self._cast
+        if cast.is_idle:
+            return
+
+        media = cast.media_controller
+        logger.info("Replacing current media on %s", self._device.name)
+        try:
+            if media.status and media.status.media_session_id is not None:
+                media.stop()
+                time.sleep(0.3)
+                self._sync_cast_state()
+                if cast.is_idle:
+                    return
+        except RequestFailed as exc:
+            logger.warning(
+                "Media stop failed on %s before new playback: %s",
+                self._device.name,
+                exc,
+            )
+
+        logger.info("Quitting receiver on %s for new playback", self._device.name)
+        try:
+            cast.quit_app()
+            time.sleep(0.3)
+        except Exception as exc:
+            logger.warning(
+                "quit_app failed on %s before new playback: %s",
+                self._device.name,
+                exc,
+            )
+        self._sync_cast_state()
 
     def _reset_receiver_before_subtitle_free_video(self) -> None:
         """Tear down the Cast receiver so a direct film switch drops prior subtitle tracks."""
@@ -323,9 +394,11 @@ class CastController:
         volume_level = cast_status.volume_level if cast_status else None
         volume_muted = cast_status.volume_muted if cast_status else None
 
-        player_state = getattr(media_status, "player_state", None)
-        if (player_state is None or player_state == "UNKNOWN") and not cast.is_idle:
-            player_state = "ACTIVE"
+        player_state = normalize_player_state(
+            device_idle=cast.is_idle,
+            player_state=getattr(media_status, "player_state", None),
+            media_session_id=getattr(media_status, "media_session_id", None),
+        )
 
         return PlaybackStatus(
             device_name=self._device.name,

@@ -237,8 +237,14 @@ async def devices_discover(
 
 
 @app.get("/devices/{device_id}/status")
-async def device_status(device_id: str, request: Request, ref: DeviceRef = None):
-    ref = ref or DeviceRef()
+async def device_status(
+    device_id: str,
+    request: Request,
+    host: str | None = None,
+    port: int = 8009,
+    name: str | None = None,
+):
+    ref = DeviceRef(host=host, port=port, name=name)
     device = _device_from_pool_or_ref(device_id, ref)
 
     def fn(controller: CastController):
