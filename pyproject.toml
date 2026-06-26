@@ -10,10 +10,14 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "PyChromecast>=14.0,<15",
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
 ]
 
 [project.scripts]
 moonpath = "moonpath.cli_app:main"
+moonpath-service = "moonpath.service:app"
 
 [tool.setuptools.packages.find]
 where = ["."]
