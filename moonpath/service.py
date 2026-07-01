@@ -45,16 +45,34 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Moonpath", description="Google Cast control service", lifespan=lifespan)
 
 
+def _should_emit_http_telemetry(method: str, status_code: int) -> bool:
+    # Errors are always worth surfacing; routine GET/HEAD reads are not,
+    # per polaris telemetry.md's "what gets logged" rule.
+    if status_code >= 400:
+        return True
+    return method not in ("GET", "HEAD")
+
+
 @app.middleware("http")
 async def telemetry_middleware(request: Request, call_next):
     ctx = telemetry.correlation_from_headers(request.headers)
     token = telemetry.set_telemetry_context(ctx)
+    start_ms = time.monotonic() * 1000
     try:
         response = await call_next(request)
     finally:
         telemetry.reset_telemetry_context(token)
     response.headers["X-Request-ID"] = ctx.request_id
     response.headers["X-Trace-ID"] = ctx.trace_id
+
+    if _should_emit_http_telemetry(request.method, response.status_code):
+        telemetry.emit(
+            event_name="http.request.completed",
+            body=f"{request.method} {request.url.path} {response.status_code}",
+            severity="ERROR" if response.status_code >= 500 else "WARN" if response.status_code >= 400 else "INFO",
+            attributes={"method": request.method, "path": request.url.path, "status_code": response.status_code},
+            duration_ms=time.monotonic() * 1000 - start_ms,
+        )
     return response
 
 
