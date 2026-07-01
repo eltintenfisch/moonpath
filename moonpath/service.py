@@ -45,6 +45,19 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Moonpath", description="Google Cast control service", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def telemetry_middleware(request: Request, call_next):
+    ctx = telemetry.correlation_from_headers(request.headers)
+    token = telemetry.set_telemetry_context(ctx)
+    try:
+        response = await call_next(request)
+    finally:
+        telemetry.reset_telemetry_context(token)
+    response.headers["X-Request-ID"] = ctx.request_id
+    response.headers["X-Trace-ID"] = ctx.trace_id
+    return response
+
+
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
@@ -87,12 +100,6 @@ class MuteRequest(DeviceRef):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _correlation(request: Request) -> tuple[str, str]:
-    request_id = request.headers.get("x-request-id") or telemetry.new_trace_id()
-    trace_id = request.headers.get("x-trace-id") or telemetry.new_trace_id()
-    return request_id, trace_id
-
 
 def _resolve_device(device_id: str, ref: DeviceRef) -> CastDevice:
     host = (ref.host or "").strip()
@@ -140,13 +147,11 @@ async def _run(
     fn,
     attributes: dict | None = None,
 ) -> Any:
-    request_id, trace_id = _correlation(request)
     start_ms = time.monotonic() * 1000
 
     telemetry.emit(
         event_name="cast.request",
         body=f"{operation} requested",
-        trace_id=trace_id,
         entity="cast_device",
         entity_id=device_id,
         attributes={"operation": operation, "device_name": device.name, **(attributes or {})},
@@ -160,7 +165,6 @@ async def _run(
             event_name="cast.error",
             body=f"{operation} failed",
             exc=exc,
-            trace_id=trace_id,
             entity="cast_device",
             entity_id=device_id,
             duration_ms=duration_ms,
@@ -172,7 +176,6 @@ async def _run(
     telemetry.emit(
         event_name="cast.success",
         body=f"{operation} completed",
-        trace_id=trace_id,
         entity="cast_device",
         entity_id=device_id,
         duration_ms=duration_ms,
@@ -198,13 +201,11 @@ async def devices_discover(
     request: Request,
     timeout: float = DEFAULT_DISCOVERY_TIMEOUT,
 ):
-    request_id, trace_id = _correlation(request)
     start_ms = time.monotonic() * 1000
 
     telemetry.emit(
         event_name="cast.request",
         body="discover requested",
-        trace_id=trace_id,
         entity="cast_service",
         attributes={"operation": "discover", "timeout": timeout},
     )
@@ -219,7 +220,6 @@ async def devices_discover(
             event_name="cast.error",
             body="discover failed",
             exc=exc,
-            trace_id=trace_id,
             duration_ms=duration_ms,
             attributes={"operation": "discover"},
         )
@@ -229,7 +229,6 @@ async def devices_discover(
     telemetry.emit(
         event_name="cast.success",
         body=f"discover completed, {len(found)} device(s) found",
-        trace_id=trace_id,
         duration_ms=duration_ms,
         attributes={"operation": "discover", "count": len(found)},
     )

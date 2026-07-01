@@ -150,45 +150,50 @@ def main(argv: list[str] | None = None) -> None:
 
     operation = args.command
     device_id = getattr(args, "device_id", None)
-    trace_id = telemetry.new_trace_id()
+    ctx = telemetry.TelemetryContext(
+        request_id=telemetry.new_request_id(),
+        trace_id=telemetry.new_trace_id(),
+        span_id=telemetry.new_span_id(),
+    )
+    token = telemetry.set_telemetry_context(ctx)
     start_ms = time.monotonic() * 1000
 
-    telemetry.emit(
-        event_name="command.start",
-        body=f"{operation} started",
-        trace_id=trace_id,
-        entity="cast_device",
-        entity_id=device_id,
-        attributes={"operation": operation, **({"device_id": device_id} if device_id else {})},
-    )
-
     try:
-        result = handlers[operation](args)
-    except Exception as exc:
+        telemetry.emit(
+            event_name="command.start",
+            body=f"{operation} started",
+            entity="cast_device",
+            entity_id=device_id,
+            attributes={"operation": operation, **({"device_id": device_id} if device_id else {})},
+        )
+
+        try:
+            result = handlers[operation](args)
+        except Exception as exc:
+            duration_ms = time.monotonic() * 1000 - start_ms
+            telemetry.emit_error(
+                event_name="command.error",
+                body=f"{operation} failed",
+                exc=exc,
+                entity="cast_device",
+                entity_id=device_id,
+                duration_ms=duration_ms,
+                attributes={"operation": operation, **({"device_id": device_id} if device_id else {})},
+            )
+            sys.exit(fail(operation, exc, json_mode=args.json))
+
         duration_ms = time.monotonic() * 1000 - start_ms
-        telemetry.emit_error(
-            event_name="command.error",
-            body=f"{operation} failed",
-            exc=exc,
-            trace_id=trace_id,
+        telemetry.emit(
+            event_name="command.success",
+            body=f"{operation} completed",
             entity="cast_device",
             entity_id=device_id,
             duration_ms=duration_ms,
             attributes={"operation": operation, **({"device_id": device_id} if device_id else {})},
         )
-        sys.exit(fail(operation, exc, json_mode=args.json))
-
-    duration_ms = time.monotonic() * 1000 - start_ms
-    telemetry.emit(
-        event_name="command.success",
-        body=f"{operation} completed",
-        trace_id=trace_id,
-        entity="cast_device",
-        entity_id=device_id,
-        duration_ms=duration_ms,
-        attributes={"operation": operation, **({"device_id": device_id} if device_id else {})},
-    )
-    emit_success(operation, result, json_mode=args.json)
+        emit_success(operation, result, json_mode=args.json)
+    finally:
+        telemetry.reset_telemetry_context(token)
 
 
 def fail(operation: str, exc: BaseException, *, json_mode: bool) -> int:
