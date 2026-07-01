@@ -163,7 +163,7 @@ def emit(
 ) -> dict:
     ctx = get_telemetry_context()
     record: dict = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         "severity_text": severity,
         "event.name": event_name,
         "body": body,
@@ -205,7 +205,7 @@ def emit_error(
 ) -> dict:
     ctx = get_telemetry_context()
     record: dict = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
         "severity_text": "ERROR",
         "event.name": event_name,
         "body": body,
