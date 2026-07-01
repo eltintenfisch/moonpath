@@ -25,7 +25,9 @@ uvicorn moonpath.service:app --host 127.0.0.1 --port 8001
 Or via systemd (recommended):
 
 ```bash
-systemctl --user enable --now moonpath
+sudo ln -sf /home/rod/code/moonpath/services/moonpath.service /etc/systemd/system/moonpath.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now moonpath
 ```
 
 ### Environment variables

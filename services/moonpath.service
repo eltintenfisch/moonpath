@@ -1,13 +1,19 @@
 [Unit]
 Description=Moonpath Cast control service
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
+User=rod
+Group=rod
 WorkingDirectory=/home/rod/code/moonpath
 ExecStart=/home/rod/code/moonpath/.venv/bin/uvicorn moonpath.service:app --host 127.0.0.1 --port 8001
 Restart=on-failure
 RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=moonpath
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
